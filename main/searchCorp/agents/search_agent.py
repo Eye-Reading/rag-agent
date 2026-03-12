@@ -73,11 +73,32 @@ class SearchInput(TypedDict):
     searchCriteria: SearchCriteria
 
 
+PASS_THRESHOLD = 15  # marketScore + techScore + finalScore 합산 기준
+
+
+class RejectionRecord(TypedDict):
+    companyName: str
+    totalScore: int
+    marketScore: int
+    marketScoringReason: str
+    techScore: int
+    techScoringReason: str
+    startupScore: int
+    startupScoringReason: str
+    startupInfo: StartupInfo  # 원본 기업 데이터
+
+
 class SearchOutput(TypedDict):
     startupList: list[StartupInfo]
-    fetchedAt: str      # ISO 8601, 재탐색 시 이전 결과와 비교용
-    totalFetched: int   # 실제로 LLM이 가져온 기업 수
-    analyses: dict      # 기업명 → {market_eval: MarketEvalOutput, tech_summary: TechSummaryOutput}
+    fetchedAt: str              # ISO 8601, 재탐색 시 이전 결과와 비교용
+    totalFetched: int           # 실제로 LLM이 가져온 기업 수
+    analyses: dict              # 기업명 → {market_eval, tech_summary, startup_eval}
+    evaluations: list[RejectionRecord]      # 전 기업 점수 + 상세 근거 (통과/반려 무관)
+    passed: list[str]           # 총점 >= PASS_THRESHOLD 기업명 목록
+    rejected: list[str]         # 총점 < PASS_THRESHOLD 기업명 목록
+    allRejected: bool           # 수집된 기업 전원 반려 시 True
+    passReport: list[RejectionRecord]       # 보고서 에이전트용 통과 기업 상세 데이터
+    rejectionReport: list[RejectionRecord]  # allRejected=True 시 보고서 에이전트용 상세 반려 데이터
 
 
 class SearchAgentState(TypedDict):
@@ -231,26 +252,45 @@ def _get_startup_list(criteria: SearchCriteria) -> list[StartupInfo]:
         }
     }, ensure_ascii=False, indent=2)
 
+    system_msg = {
+        "role": "system",
+        "content": (
+            "당신은 국내 반도체 스타트업 생태계 전문가입니다. "
+            "웹 검색을 통해 실제 존재하는 스타트업만 수집합니다. "
+            "가상의 기업은 절대 만들지 마세요. "
+            "정보가 불확실한 경우 '미공개' 또는 빈 리스트로 표기하세요."
+        ),
+    }
+    user_msg = {
+        "role": "user",
+        "content": (
+            f"웹 검색으로 다음 조건에 맞는 실제 국내 반도체 스타트업 {fetch_count}개를 탐색해주세요.\n\n"
+            f"## 탐색 조건\n{filter_desc}\n"
+            f"실제로 존재하는 기업만 수집하고, 각 기업의 팀·투자·트랙션 정보도 웹에서 검색하세요."
+        ),
+    }
+
+    # Step 1: 웹 검색으로 실제 기업 목록 수집
+    search_response = client.chat.completions.create(
+        model="gpt-4o-search-preview",
+        messages=[system_msg, user_msg],
+    )
+    search_content = search_response.choices[0].message.content or ""
+
+    # Step 2: 검색 결과를 JSON 스키마로 정리
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[
-            {
-                "role": "system",
-                "content": (
-                    "당신은 국내 반도체 스타트업 생태계 전문가입니다. "
-                    "스타트업의 팀 구성, 투자 현황, 트랙션 정보를 정확히 파악하고 있습니다. "
-                    "정보가 불확실한 경우 '미공개' 또는 빈 리스트로 표기하세요."
-                ),
-            },
+            system_msg,
+            user_msg,
+            {"role": "assistant", "content": search_content},
             {
                 "role": "user",
                 "content": (
-                    f"다음 조건에 맞는 국내 반도체 스타트업 {fetch_count}개를 탐색해주세요.\n\n"
-                    f"## 탐색 조건\n{filter_desc}\n"
-                    f"## 응답 형식\n"
-                    f"아래 JSON 스키마를 가진 배열로만 응답하세요 (다른 텍스트 없이):\n"
+                    f"위 검색 결과를 바탕으로 아래 JSON 스키마를 가진 배열로만 응답하세요 (다른 텍스트 없이):\n"
                     f"{schema_example}\n\n"
-                    f"위 스키마를 가진 JSON 배열로 {fetch_count}개 기업을 응답하세요."
+                    f"위 스키마를 가진 JSON 배열로 {fetch_count}개 기업을 응답하세요. "
+                    f"검색으로 확인된 실제 기업만 포함하세요."
                 ),
             },
         ],
@@ -295,9 +335,9 @@ def _route_tool(tool_name: str, tool_input: dict) -> str:
             input={
                 "startupId": startup["startupId"],
                 "name":      startup["name"],
-                "team":      startup["team"],
-                "funding":   startup["funding"],
-                "traction":  startup["traction"],
+                "team":      startup.get("team",     {}),
+                "funding":   startup.get("funding",  {}),
+                "traction":  startup.get("traction", {}),
             },
             output={},  # type: ignore[typeddict-item]
         )
@@ -415,15 +455,66 @@ def run_search_agent(state: SearchAgentState) -> SearchAgentState:
             print(f"⚠️  예상치 못한 finish_reason: {choice.finish_reason}")
             break
 
-    # Step 3: state output 채우기
+    # Step 3: 점수 합산 후 통과/반려 분류
+    passed, rejected = [], []
+    for name, result in analyses.items():
+        total = (
+            result.get("market_eval",  {}).get("marketScore",  0) +
+            result.get("tech_summary", {}).get("techScore",    0) +
+            result.get("startup_eval", {}).get("finalScore",   0)
+        )
+        if total >= PASS_THRESHOLD:
+            passed.append(name)
+            print(f"  ✅ {name} — 총점 {total} (통과)")
+        else:
+            rejected.append(name)
+            print(f"  ❌ {name} — 총점 {total} (반려)")
+
+    # Step 4: 보고서 에이전트용 상세 데이터 구성
+    all_rejected = len(passed) == 0
+
+    startup_map: dict[str, StartupInfo] = {s["name"]: s for s in startup_list}
+
+    def _build_record(name: str) -> RejectionRecord:
+        a = analyses.get(name, {})
+        market  = a.get("market_eval",  {})
+        tech    = a.get("tech_summary", {})
+        startup = a.get("startup_eval", {})
+        return RejectionRecord(
+            companyName=name,
+            totalScore=(
+                market.get("marketScore", 0) +
+                tech.get("techScore",     0) +
+                startup.get("finalScore", 0)
+            ),
+            marketScore=market.get("marketScore", 0),
+            marketScoringReason=market.get("scoringReason", ""),
+            techScore=tech.get("techScore", 0),
+            techScoringReason=tech.get("scoringReason", ""),
+            startupScore=startup.get("finalScore", 0),
+            startupScoringReason=startup.get("scoringReason", ""),
+            startupInfo=startup_map.get(name, {}),  # type: ignore[arg-type]
+        )
+
+    evaluations: list[RejectionRecord] = [_build_record(name) for name in analyses]
+    pass_report: list[RejectionRecord] = [_build_record(name) for name in passed]
+    rejection_report: list[RejectionRecord] = [_build_record(name) for name in rejected] if all_rejected else []
+
+    # Step 5: state output 채우기
     state["output"] = SearchOutput(
         startupList=startup_list,
         fetchedAt=datetime.now(timezone.utc).isoformat(),
         totalFetched=len(startup_list),
         analyses=analyses,
+        evaluations=evaluations,
+        passed=passed,
+        rejected=rejected,
+        allRejected=all_rejected,
+        passReport=pass_report,
+        rejectionReport=rejection_report,
     )
 
-    # Step 4: 다음 단계 에이전트에 전달
+    # Step 5: 다음 단계 에이전트에 전달
     _send_to_next_stage(state, analyses)
 
     return state
