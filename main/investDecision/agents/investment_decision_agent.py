@@ -138,6 +138,9 @@ class InvestmentDecisionState(TypedDict):
 # DNA 유사도 계산 유틸 (Step 3)
 # ──────────────────────────────────────────
 
+TEAM_MAX_SCORE = 35.0
+MARKET_MAX_SCORE = 25.0
+TECH_MAX_SCORE = 25.0
 DNA_MAX_SCORE = 15.0
 
 _dna_rag: Optional[DnaRoleModelRAG] = None
@@ -230,6 +233,68 @@ def calculate_dna_weighted_score(startup_info: StartupInfo) -> DnaWeightedScore:
     )
 
 
+def _clamp_raw_score(score: int) -> int:
+    """원점수 범위를 0~10으로 보정합니다."""
+    return max(0, min(10, int(score)))
+
+
+def _calculate_weighted_item_score(
+    raw_score: int,
+    max_score: float,
+    reason: str,
+) -> WeightedItemScore:
+    normalized = _clamp_raw_score(raw_score)
+    weighted = round((normalized / 10.0) * max_score, 2)
+    return WeightedItemScore(
+        rawScore=normalized,
+        weightedScore=weighted,
+        maxScore=max_score,
+        reason=reason,
+    )
+
+
+def _build_investment_ranking(company: PassedCompany) -> InvestmentRanking:
+    """과락 통과 기업 1건에 대한 최종 투자 점수와 랭킹 단위를 구성합니다."""
+    team_score = _calculate_weighted_item_score(
+        raw_score=company.get("startupScore", 0),
+        max_score=TEAM_MAX_SCORE,
+        reason=company.get("startupScoringReason", ""),
+    )
+    market_score = _calculate_weighted_item_score(
+        raw_score=company.get("marketScore", 0),
+        max_score=MARKET_MAX_SCORE,
+        reason=company.get("marketScoringReason", ""),
+    )
+    tech_score = _calculate_weighted_item_score(
+        raw_score=company.get("techScore", 0),
+        max_score=TECH_MAX_SCORE,
+        reason=company.get("techScoringReason", ""),
+    )
+
+    startup_info = company.get("startupInfo", {})
+    dna_score = calculate_dna_weighted_score(startup_info)
+
+    total_score = round(
+        team_score["weightedScore"]
+        + market_score["weightedScore"]
+        + tech_score["weightedScore"]
+        + dna_score["weightedScore"],
+        2,
+    )
+
+    return InvestmentRanking(
+        rank=0,  # 정렬 이후 재할당
+        companyName=company.get("companyName", "unknown"),
+        totalScore=total_score,
+        teamScore=team_score,
+        marketScore=market_score,
+        techScore=tech_score,
+        dnaScore=dna_score,
+        references=company.get("references", []),
+        startupInfo=startup_info,
+    )
+
+
 # ──────────────────────────────────────────
 # 진입점 (구현은 Step 4에서 완성)
 # ──────────────────────────────────────────
@@ -250,5 +315,28 @@ def run_investment_decision_agent(state: InvestmentDecisionState) -> InvestmentD
             - output.rankings      : 총점 내림차순 InvestmentRanking 리스트 (통과 기업이 있을 때)
             - output.rejectionReport: 전원 과락 시 그대로 전달
     """
-    # TODO: Step 4에서 구현
-    raise NotImplementedError("Step 4에서 구현 예정")
+    inp = state["input"]
+    all_rejected = bool(inp.get("allRejected", False))
+
+    if all_rejected:
+        state["output"] = InvestmentDecisionOutput(
+            allRejected=True,
+            rankings=[],
+            rejectionReport=inp.get("rejectionReport", []),
+        )
+        return state
+
+    pass_report = inp.get("passReport", [])
+    rankings = [_build_investment_ranking(company) for company in pass_report]
+
+    # 총점 내림차순 정렬 후 1위부터 랭크 부여
+    rankings.sort(key=lambda x: x["totalScore"], reverse=True)
+    for idx, ranking in enumerate(rankings, start=1):
+        ranking["rank"] = idx
+
+    state["output"] = InvestmentDecisionOutput(
+        allRejected=False,
+        rankings=rankings,
+        rejectionReport=[],
+    )
+    return state
