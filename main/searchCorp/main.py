@@ -3,19 +3,29 @@
 
 실행 방법:
   cd main/searchCorp
-  ANTHROPIC_API_KEY=<your-key> python main.py
+  ANTHROPIC_API_KEY=<your-key> OPENAI_API_KEY=<your-key> python main.py
+
+실행 순서:
+  1. searchCorp  — 반도체 스타트업 탐색 및 시장성·기술·종합 평가
+  2. investDecision — 가중치 합산 및 DNA 유사도 기반 투자 우선순위 랭킹
+  3. reportWriter — LLM 기반 마크다운 투자 보고서 생성 → report_<날짜>.md 저장
 """
 import sys
 import os
 import json
+from datetime import date
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-# 프로젝트 루트의 .env 로드 (main/searchCorp/main.py → 루트)
+# 프로젝트 루트의 .env 로드 — import 전에 실행해야 API 키가 환경변수에 등록됩니다.
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# searchCorp 및 main 디렉토리를 sys.path에 추가합니다.
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_MAIN_DIR = os.path.dirname(_BASE_DIR)
+sys.path.insert(0, _BASE_DIR)
+sys.path.insert(0, _MAIN_DIR)
 
 from agents.search_agent import run_search_agent, SearchAgentState, SearchCriteria
 
@@ -88,29 +98,28 @@ def main():
         total = sum(s for s in [market_score, tech_score, final_score] if isinstance(s, int))
         print(f"  • {name} ({startup.get('stage', '?')}) | 시장 {market_score} + 기술 {tech_score} + 종합 {final_score} = {total}점")
 
-    # 결과 저장
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-
-    output_path = os.path.join(base_dir, "analysis_results.json")
+    # JSON 결과 저장
+    output_path = os.path.join(_BASE_DIR, "analysis_results.json")
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(result_state, f, ensure_ascii=False, indent=2)
 
-    investment_output_path = os.path.join(base_dir, "investment_decision_results.json")
+    investment_output_path = os.path.join(_BASE_DIR, "investment_decision_results.json")
     with open(investment_output_path, "w", encoding="utf-8") as f:
         json.dump(investment_decision, f, ensure_ascii=False, indent=2)
 
-    report_handoff_payload = {
-        "allRejected": investment_decision.get("allRejected", output.get("allRejected", False)),
-        "rankings": investment_decision.get("rankings", []),
-        "rejectionReport": investment_decision.get("rejectionReport", output.get("rejectionReport", [])),
-    }
-    report_handoff_path = os.path.join(base_dir, "report_handoff_payload.json")
-    with open(report_handoff_path, "w", encoding="utf-8") as f:
-        json.dump(report_handoff_payload, f, ensure_ascii=False, indent=2)
+    print(f"\n결과 저장: {output_path}")
+    print(f"투자판단 저장: {investment_output_path}")
 
-    print(f"\n💾 결과 저장: {output_path}")
-    print(f"💾 투자판단 저장: {investment_output_path}")
-    print(f"💾 보고서 전달 payload 저장: {report_handoff_path}")
+    # 마크다운 보고서 저장
+    report: str = investment_decision.get("report", "")
+    if report:
+        report_filename = f"report_{date.today().isoformat()}.md"
+        report_path = os.path.join(_BASE_DIR, report_filename)
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(report)
+        print(f"보고서 저장: {report_path}")
+    else:
+        print("보고서 생성 결과가 없습니다. 파이프라인 로그를 확인하세요.")
 
 
 if __name__ == "__main__":
