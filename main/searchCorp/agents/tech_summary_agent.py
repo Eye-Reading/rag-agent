@@ -28,7 +28,7 @@ class TechSummaryOutput(TypedDict):
 
 class TechSummaryState(TypedDict):
     input: TechSummaryInput
-    output: TechSummaryOutput  # TODO: 추후 state 정의 예정
+    output: TechSummaryOutput
 
 
 # ──────────────────────────────────────────

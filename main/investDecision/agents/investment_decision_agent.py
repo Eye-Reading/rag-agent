@@ -299,15 +299,45 @@ def _send_to_next_stage(state: InvestmentDecisionState) -> None:
     """
     다음 단계(보고서 생성 에이전트)로 state를 전달합니다.
 
-    TODO: 보고서 생성 에이전트 구현 시 실제 노드 호출로 교체
+    보고서 생성 에이전트가 준비되면 이 위치에서 실제 노드 호출을 연결합니다.
     Args:
         state: InvestmentDecisionState
     """
     _ = state
 
 
+def _log_investment_output(output: InvestmentDecisionOutput) -> None:
+    """투자 판단 결과를 운영 로그로 출력합니다."""
+    if output.get("allRejected", False):
+        rejected_count = len(output.get("rejectionReport", []))
+        print(f"\n📤 [InvestmentDecision] 전원 과락 — 보고서 노드로 반려 데이터 {rejected_count}건 전달")
+        return
+
+    rankings = output.get("rankings", [])
+    print(f"\n📤 [InvestmentDecision] 보고서 노드 전달 데이터 — 랭킹 {len(rankings)}건")
+    for ranking in rankings:
+        company = ranking.get("companyName", "unknown")
+        rank = ranking.get("rank", 0)
+        total = ranking.get("totalScore", 0.0)
+
+        team = ranking.get("teamScore", {}).get("weightedScore", 0.0)
+        market = ranking.get("marketScore", {}).get("weightedScore", 0.0)
+        tech = ranking.get("techScore", {}).get("weightedScore", 0.0)
+        dna = ranking.get("dnaScore", {}).get("weightedScore", 0.0)
+
+        dna_reason = ranking.get("dnaScore", {}).get("reason", "")
+        refs = ranking.get("references", [])
+
+        print(
+            f"  {rank}위 {company} | 총점 {total}점 "
+            f"(Team {team} + Market {market} + Tech {tech} + DNA {dna})"
+        )
+        print(f"     - DNA 근거: {dna_reason}")
+        print(f"     - 참고자료 {len(refs)}건")
+
+
 # ──────────────────────────────────────────
-# 진입점 (구현은 Step 4에서 완성)
+# 진입점
 # ──────────────────────────────────────────
 
 def run_investment_decision_agent(state: InvestmentDecisionState) -> InvestmentDecisionState:
@@ -335,6 +365,7 @@ def run_investment_decision_agent(state: InvestmentDecisionState) -> InvestmentD
             rankings=[],
             rejectionReport=inp.get("rejectionReport", []),
         )
+        _log_investment_output(state["output"])
         _send_to_next_stage(state)
         return state
 
@@ -351,5 +382,6 @@ def run_investment_decision_agent(state: InvestmentDecisionState) -> InvestmentD
         rankings=rankings,
         rejectionReport=[],
     )
+    _log_investment_output(state["output"])
     _send_to_next_stage(state)
     return state

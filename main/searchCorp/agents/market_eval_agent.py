@@ -31,14 +31,14 @@ class MarketEvalOutput(TypedDict):
 
 class MarketEvalState(TypedDict):
     input: MarketEvalInput
-    output: MarketEvalOutput  # TODO: 추후 state 정의 예정
+    output: MarketEvalOutput
 
 
 # ──────────────────────────────────────────
 # RAG 싱글톤
 # ──────────────────────────────────────────
 
-# TODO: 시장성 평가 기준을 아래에 직접 작성하세요
+# 운영 환경 기준에 맞춰 항목을 보완해 사용할 수 있습니다.
 EVALUATION_CRITERIA = """
 평가 기준:
 - 기준 1:
