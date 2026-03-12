@@ -8,6 +8,12 @@
 import sys
 import os
 import json
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# 프로젝트 루트의 .env 로드 (main/searchCorp/main.py → 루트)
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
