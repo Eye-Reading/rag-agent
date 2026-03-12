@@ -8,8 +8,10 @@ Search 에이전트 (Supervisor)
   4. 다음 단계 에이전트에 전달 (미구현)
 """
 import json
+import os
+import sys
 from datetime import datetime, timezone
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from openai import OpenAI
 
@@ -74,6 +76,7 @@ class SearchInput(TypedDict):
 
 
 PASS_THRESHOLD = 15  # marketScore + techScore + finalScore 합산 기준
+MAX_STARTUP_FETCH_RETRIES = 3
 
 
 class RejectionRecord(TypedDict):
@@ -86,6 +89,7 @@ class RejectionRecord(TypedDict):
     startupScore: int
     startupScoringReason: str
     startupInfo: StartupInfo  # 원본 기업 데이터
+    references: list[str]     # market_eval · tech_summary · startup_eval 출처 통합
 
 
 class SearchOutput(TypedDict):
@@ -99,6 +103,7 @@ class SearchOutput(TypedDict):
     allRejected: bool           # 수집된 기업 전원 반려 시 True
     passReport: list[RejectionRecord]       # 보고서 에이전트용 통과 기업 상세 데이터
     rejectionReport: list[RejectionRecord]  # allRejected=True 시 보고서 에이전트용 상세 반려 데이터
+    investmentDecision: NotRequired[dict]   # 투자 판단 에이전트 결과 (보고서 노드 전달용)
 
 
 class SearchAgentState(TypedDict):
@@ -252,56 +257,77 @@ def _get_startup_list(criteria: SearchCriteria) -> list[StartupInfo]:
         }
     }, ensure_ascii=False, indent=2)
 
-    system_msg = {
-        "role": "system",
-        "content": (
-            "당신은 국내 반도체 스타트업 생태계 전문가입니다. "
-            "웹 검색을 통해 실제 존재하는 스타트업만 수집합니다. "
-            "가상의 기업은 절대 만들지 마세요. "
-            "정보가 불확실한 경우 '미공개' 또는 빈 리스트로 표기하세요."
-        ),
-    }
-    user_msg = {
-        "role": "user",
-        "content": (
-            f"웹 검색으로 다음 조건에 맞는 실제 국내 반도체 스타트업 {fetch_count}개를 탐색해주세요.\n\n"
-            f"## 탐색 조건\n{filter_desc}\n"
-            f"실제로 존재하는 기업만 수집하고, 각 기업의 팀·투자·트랙션 정보도 웹에서 검색하세요."
-        ),
-    }
+    last_error: str = ""
 
-    # Step 1: 웹 검색으로 실제 기업 목록 수집
-    search_response = client.chat.completions.create(
-        model="gpt-4o-search-preview",
-        messages=[system_msg, user_msg],
-    )
-    search_content = search_response.choices[0].message.content or ""
+    for attempt in range(1, MAX_STARTUP_FETCH_RETRIES + 1):
+        system_msg = {
+            "role": "system",
+            "content": (
+                "당신은 국내 반도체 스타트업 생태계 전문가입니다. "
+                "웹 검색을 통해 실제 존재하는 스타트업만 수집합니다. "
+                "가상의 기업은 절대 만들지 마세요. "
+                "정보가 불확실한 경우 '미공개' 또는 빈 리스트로 표기하세요."
+            ),
+        }
+        user_msg = {
+            "role": "user",
+            "content": (
+                f"웹 검색으로 다음 조건에 맞는 실제 국내 반도체 스타트업 {fetch_count}개를 탐색해주세요.\n\n"
+                f"## 탐색 조건\n{filter_desc}\n"
+                "실제로 존재하는 기업만 수집하고, 각 기업의 팀·투자·트랙션 정보도 웹에서 검색하세요.\n"
+                "기업이 없다는 확실한 근거가 없는 한 빈 배열을 반환하지 마세요."
+            ),
+        }
 
-    # Step 2: 검색 결과를 JSON 스키마로 정리
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            system_msg,
-            user_msg,
-            {"role": "assistant", "content": search_content},
-            {
-                "role": "user",
-                "content": (
-                    f"위 검색 결과를 바탕으로 아래 JSON 스키마를 가진 배열로만 응답하세요 (다른 텍스트 없이):\n"
-                    f"{schema_example}\n\n"
-                    f"위 스키마를 가진 JSON 배열로 {fetch_count}개 기업을 응답하세요. "
-                    f"검색으로 확인된 실제 기업만 포함하세요."
-                ),
-            },
-        ],
-    )
+        search_response = client.chat.completions.create(
+            model="gpt-4o-search-preview",
+            messages=[system_msg, user_msg],
+        )
+        search_content = search_response.choices[0].message.content or ""
 
-    text = response.choices[0].message.content or ""
-    start, end = text.find('['), text.rfind(']') + 1
-    if start == -1 or end == 0:
-        raise ValueError(f"스타트업 목록 JSON 파싱 실패. 응답: {text[:300]}")
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                system_msg,
+                user_msg,
+                {"role": "assistant", "content": search_content},
+                {
+                    "role": "user",
+                    "content": (
+                        f"위 검색 결과를 바탕으로 아래 JSON 스키마를 가진 배열로만 응답하세요 (다른 텍스트 없이):\n"
+                        f"{schema_example}\n\n"
+                        f"위 스키마를 가진 JSON 배열로 최소 {fetch_count}개 기업을 응답하세요. "
+                        "단, 검색으로 확인된 실제 기업만 포함하세요."
+                    ),
+                },
+            ],
+        )
 
-    return json.loads(text[start:end])
+        text = response.choices[0].message.content or ""
+        start, end = text.find('['), text.rfind(']') + 1
+        if start == -1 or end == 0:
+            last_error = f"스타트업 목록 JSON 파싱 실패(시도 {attempt})"
+            continue
+
+        try:
+            startups = json.loads(text[start:end])
+        except json.JSONDecodeError:
+            last_error = f"스타트업 목록 JSON 디코딩 실패(시도 {attempt})"
+            continue
+
+        if not isinstance(startups, list):
+            last_error = f"스타트업 목록 타입 오류(시도 {attempt})"
+            continue
+
+        valid_startups = [s for s in startups if isinstance(s, dict) and s.get("name")]
+        if valid_startups:
+            if len(valid_startups) < fetch_count:
+                print(f"  ⚠️  탐색 수량 부족: 요청 {fetch_count}개 / 수집 {len(valid_startups)}개")
+            return valid_startups
+
+        last_error = f"스타트업 0건 수집(시도 {attempt})"
+
+    raise ValueError(f"스타트업 목록 수집 실패: {last_error}")
 
 
 def _route_tool(tool_name: str, tool_input: dict) -> str:
@@ -351,14 +377,50 @@ def _route_tool(tool_name: str, tool_input: dict) -> str:
 
 def _send_to_next_stage(state: SearchAgentState, analyses: dict) -> None:
     """
-    다음 단계 에이전트에 state와 분석 결과를 전달합니다.
+    투자 판단 에이전트에 state를 전달합니다.
 
-    TODO: 다음 단계 에이전트 구현 예정
     Args:
         state:    SearchAgentState (output.startupList 포함)
-        analyses: 기업명 → {market_eval, tech_summary}
+        analyses: 기업명 → {market_eval, tech_summary, startup_eval}
     """
-    _ = state, analyses  # TODO: 다음 단계 에이전트 연결 시 제거
+    _ = analyses
+
+    # main/searchCorp 실행 기준 sys.path에는 searchCorp 디렉토리만 포함되므로,
+    # 형제 디렉토리인 main/investDecision 패키지 임포트를 위해 main 경로를 추가합니다.
+    main_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if main_dir not in sys.path:
+        sys.path.insert(0, main_dir)
+
+    from investDecision.agents.investment_decision_agent import (  # pylint: disable=import-outside-toplevel
+        InvestmentDecisionState,
+        run_investment_decision_agent,
+    )
+
+    output = state["output"]
+    investment_state: InvestmentDecisionState = {
+        "input": {
+            "allRejected": output.get("allRejected", False),
+            "passReport": output.get("passReport", []),
+            "rejectionReport": output.get("rejectionReport", []),
+        },
+        "output": {
+            "allRejected": False,
+            "rankings": [],
+            "rejectionReport": [],
+        },
+    }
+
+    run_investment_decision_agent(investment_state)
+
+    # 다음 노드 개발자가 참조할 수 있도록 search state에 부착합니다.
+    output["investmentDecision"] = investment_state["output"]  # type: ignore[index]
+
+    investment_output = investment_state["output"]
+    if investment_output.get("allRejected", False):
+        print("\n🔁 Search → Investment 연결 완료: 전원 과락 상태 전달")
+    else:
+        rankings = investment_output.get("rankings", [])
+        print(f"\n🔁 Search → Investment 연결 완료: 랭킹 {len(rankings)}건 생성")
 
 
 # ──────────────────────────────────────────
@@ -382,6 +444,8 @@ def run_search_agent(state: SearchAgentState) -> SearchAgentState:
     # Step 1: 스타트업 목록 수집
     print(f"📋 스타트업 탐색 중 (도메인: {criteria.get('targetDomain')}) ...")
     startup_list: list[StartupInfo] = _get_startup_list(criteria)
+    if not startup_list:
+        raise RuntimeError("스타트업 목록이 비어 있습니다. 검색 조건 또는 API 응답을 확인하세요.")
     print(f"✅ {len(startup_list)}개 스타트업 수집 완료\n")
 
     # Step 2: Supervisor loop — 시장성 평가 + 기술 요약
@@ -480,6 +544,11 @@ def run_search_agent(state: SearchAgentState) -> SearchAgentState:
         market  = a.get("market_eval",  {})
         tech    = a.get("tech_summary", {})
         startup = a.get("startup_eval", {})
+        references = list(dict.fromkeys(
+            market.get("sources", [])
+            + tech.get("sources", [])
+            + startup.get("sources", [])
+        ))
         return RejectionRecord(
             companyName=name,
             totalScore=(
@@ -494,6 +563,7 @@ def run_search_agent(state: SearchAgentState) -> SearchAgentState:
             startupScore=startup.get("finalScore", 0),
             startupScoringReason=startup.get("scoringReason", ""),
             startupInfo=startup_map.get(name, {}),  # type: ignore[arg-type]
+            references=references,
         )
 
     evaluations: list[RejectionRecord] = [_build_record(name) for name in analyses]

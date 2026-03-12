@@ -8,6 +8,12 @@
 import sys
 import os
 import json
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# 프로젝트 루트의 .env 로드 (main/searchCorp/main.py → 루트)
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -51,6 +57,7 @@ def main():
     analyses = output.get("analyses", {})
     passed = output.get("passed", [])
     rejected = output.get("rejected", [])
+    investment_decision = output.get("investmentDecision", {})
 
     print("\n" + "=" * 60)
     print(f"📊 수집 완료: {output['totalFetched']}개 기업 | {output['fetchedAt']}")
@@ -82,11 +89,28 @@ def main():
         print(f"  • {name} ({startup.get('stage', '?')}) | 시장 {market_score} + 기술 {tech_score} + 종합 {final_score} = {total}점")
 
     # 결과 저장
-    output_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "analysis_results.json")
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    output_path = os.path.join(base_dir, "analysis_results.json")
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(result_state, f, ensure_ascii=False, indent=2)
 
+    investment_output_path = os.path.join(base_dir, "investment_decision_results.json")
+    with open(investment_output_path, "w", encoding="utf-8") as f:
+        json.dump(investment_decision, f, ensure_ascii=False, indent=2)
+
+    report_handoff_payload = {
+        "allRejected": investment_decision.get("allRejected", output.get("allRejected", False)),
+        "rankings": investment_decision.get("rankings", []),
+        "rejectionReport": investment_decision.get("rejectionReport", output.get("rejectionReport", [])),
+    }
+    report_handoff_path = os.path.join(base_dir, "report_handoff_payload.json")
+    with open(report_handoff_path, "w", encoding="utf-8") as f:
+        json.dump(report_handoff_payload, f, ensure_ascii=False, indent=2)
+
     print(f"\n💾 결과 저장: {output_path}")
+    print(f"💾 투자판단 저장: {investment_output_path}")
+    print(f"💾 보고서 전달 payload 저장: {report_handoff_path}")
 
 
 if __name__ == "__main__":
