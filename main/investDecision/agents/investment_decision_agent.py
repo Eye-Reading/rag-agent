@@ -8,7 +8,10 @@
   4. 총점(100점 만점) 내림차순 투자 우선순위 랭킹 생성
   5. 보고서 생성 에이전트로 State 전달
 """
-from typing import TypedDict
+import json
+from typing import Optional, TypedDict
+
+from .rag import DnaRoleModelRAG
 
 
 # ──────────────────────────────────────────
@@ -88,7 +91,7 @@ class WeightedItemScore(TypedDict):
 class DnaWeightedScore(TypedDict):
     """
     DNA 유사도 항목 점수 — Qdrant 벡터 검색으로 직접 산출.
-    성공 롤모델(NVIDIA · TSMC · SK하이닉스)과의 코사인 유사도를 15점 만점으로 환산합니다.
+    성공 롤모델(NVIDIA · Qualcomm · AMD)과의 코사인 유사도를 15점 만점으로 환산합니다.
     """
     weightedScore: float            # 0~15점
     maxScore: float                 # 15.0 (고정)
@@ -129,6 +132,102 @@ class InvestmentDecisionOutput(TypedDict):
 class InvestmentDecisionState(TypedDict):
     input: InvestmentDecisionInput
     output: InvestmentDecisionOutput
+
+
+# ──────────────────────────────────────────
+# DNA 유사도 계산 유틸 (Step 3)
+# ──────────────────────────────────────────
+
+DNA_MAX_SCORE = 15.0
+
+_dna_rag: Optional[DnaRoleModelRAG] = None
+
+
+def get_dna_rag() -> DnaRoleModelRAG:
+    """DNA 롤모델 RAG 싱글톤을 반환합니다."""
+    global _dna_rag
+    if _dna_rag is None:
+        _dna_rag = DnaRoleModelRAG()
+    return _dna_rag
+
+
+def _serialize_startup_info_for_dna(startup_info: StartupInfo) -> str:
+    """
+    searchCorp의 StartupInfo 관점을 유지해 DNA 비교용 텍스트를 생성합니다.
+    동일한 직렬화 포맷을 사용하면 롤모델 벡터와 의미 비교가 안정적입니다.
+    """
+    payload = {
+        "startupId": startup_info.get("startupId", ""),
+        "name": startup_info.get("name", ""),
+        "foundedYear": startup_info.get("foundedYear", "미공개"),
+        "domain": startup_info.get("domain", "미공개"),
+        "location": startup_info.get("location", "미공개"),
+        "stage": startup_info.get("stage", "미공개"),
+        "team": startup_info.get("team", {"founderCount": 0, "founderProfiles": []}),
+        "funding": startup_info.get(
+            "funding",
+            {
+                "totalFunding": "미공개",
+                "latestRound": "미공개",
+                "latestValuation": "미공개",
+                "keyInvestors": [],
+            },
+        ),
+        "traction": startup_info.get(
+            "traction",
+            {
+                "revenueYear": [],
+                "arrGrowthRate": "미공개",
+                "keyCustomers": [],
+            },
+        ),
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def calculate_dna_weighted_score(startup_info: StartupInfo) -> DnaWeightedScore:
+    """
+    단일 스타트업의 DNA 유사도 점수를 계산합니다.
+
+    계산식:
+        dna_score = average_similarity * 15.0
+
+    - average_similarity: 상위 롤모델 유사도 평균 (0.0 ~ 1.0)
+    - DNA 만점: 15점
+    """
+    rag = get_dna_rag()
+    query_text = _serialize_startup_info_for_dna(startup_info)
+    points = rag.search_similar(query_text=query_text, top_k=3)
+
+    if not points:
+        return DnaWeightedScore(
+            weightedScore=0.0,
+            maxScore=DNA_MAX_SCORE,
+            similarCompanies=[],
+            similarityScores=[],
+            reason="롤모델 벡터 데이터가 없어 DNA 유사도 점수를 0점으로 처리했습니다.",
+        )
+
+    similar_companies = [str(p.payload.get("company", "unknown")) for p in points if p.payload]
+    similarity_scores = [round(float(p.score), 4) for p in points]
+
+    avg_similarity = sum(similarity_scores) / len(similarity_scores)
+    weighted_score = round(avg_similarity * DNA_MAX_SCORE, 2)
+
+    top_name = similar_companies[0] if similar_companies else "unknown"
+    top_score = similarity_scores[0] if similarity_scores else 0.0
+
+    return DnaWeightedScore(
+        weightedScore=weighted_score,
+        maxScore=DNA_MAX_SCORE,
+        similarCompanies=similar_companies,
+        similarityScores=similarity_scores,
+        reason=(
+            f"상위 롤모델 {', '.join(similar_companies)}와의 코사인 유사도 평균 "
+            f"{avg_similarity:.4f}를 15점 만점으로 환산했습니다. "
+            f"가장 유사한 기업은 {top_name}({top_score:.4f})입니다."
+        ),
+    )
 
 
 # ──────────────────────────────────────────
