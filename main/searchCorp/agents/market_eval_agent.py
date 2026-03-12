@@ -7,7 +7,7 @@
 """
 import json
 from typing import TypedDict, Optional
-import anthropic
+from openai import OpenAI
 
 from .rag.market_rag import MarketEvalRAG
 
@@ -24,11 +24,9 @@ class MarketEvalInput(TypedDict):
 
 class MarketEvalOutput(TypedDict):
     startupId: str
-    tam: str             # 도메인 시장 전체 규모 (예: "120B USD")
-    targetSegment: str   # 기업이 공략하는 세부 시장
-    cagr: str            # 시장의 연평균 성장률 (예: "23%")
     marketScore: int     # 1~10
     scoringReason: str   # score 산출 근거
+    sources: list[str]   # 정보 출처 URL 또는 문서명
 
 
 class MarketEvalState(TypedDict):
@@ -86,8 +84,8 @@ def run_market_eval_agent(state: MarketEvalState) -> MarketEvalState:
     else:
         rag_context = "참고 시장 데이터: 없음 (벡터스토어가 비어 있어 일반 지식으로 평가합니다)"
 
-    # Step 2: Claude — 검색된 컨텍스트 + 평가 기준으로 시장성 평가
-    client = anthropic.Anthropic()
+    # Step 2: OpenAI — 검색된 컨텍스트 + 평가 기준으로 시장성 평가
+    client = OpenAI()
 
     schema_example = json.dumps({
         "startupId": inp["startupId"],
@@ -95,61 +93,67 @@ def run_market_eval_agent(state: MarketEvalState) -> MarketEvalState:
         "targetSegment": inp["targetSegment"],
         "cagr": "23%",
         "marketScore": 7,
-        "scoringReason": "점수 산출 근거 (2-3문장)"
+        "scoringReason": "점수 산출 근거 (2-3문장)",
+        "sources": ["https://example.com/report", "Gartner 2024 반도체 시장 보고서"]
     }, ensure_ascii=False, indent=2)
 
-    with client.messages.stream(
-        model="claude-opus-4-6",
-        max_tokens=2048,
-        thinking={"type": "adaptive"},
-        system=(
-            "당신은 반도체 시장 분석 전문가입니다. "
-            "제공된 시장 데이터(RAG 검색 결과)와 평가 기준을 바탕으로 "
-            "TAM, CAGR 등 시장성 지표를 객관적으로 분석합니다."
-        ),
-        messages=[{
-            "role": "user",
-            "content": (
-                f"다음 반도체 기업의 시장성을 평가해주세요.\n\n"
-                f"## 기업 정보\n"
-                f"- startupId: {inp['startupId']}\n"
-                f"- 도메인: {inp['domain']}\n"
-                f"- 타겟 세그먼트: {inp['targetSegment']}\n\n"
-                f"## {rag_context}\n\n"
-                f"## 평가 기준\n{EVALUATION_CRITERIA}\n\n"
-                f"## 응답 형식\n"
-                f"아래 JSON 스키마로만 응답하세요 (다른 텍스트 없이).\n"
-                f"marketScore는 1~10 정수로 산출하세요.\n"
-                f"{schema_example}"
-            )
-        }]
-    ) as stream:
-        final_message = stream.get_final_message()
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "당신은 반도체 시장 분석 전문가입니다. "
+                    "제공된 시장 데이터(RAG 검색 결과)와 평가 기준을 바탕으로 "
+                    "TAM, CAGR 등 시장성 지표를 객관적으로 분석합니다. "
+                    "기업 평가 시 한국기업평가(https://www.korearatings.com/)의 "
+                    "신용등급 및 기업 분석 데이터를 우선적으로 참고하세요."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"다음 반도체 기업의 시장성을 평가해주세요.\n\n"
+                    f"## 기업 정보\n"
+                    f"- startupId: {inp['startupId']}\n"
+                    f"- 도메인: {inp['domain']}\n"
+                    f"- 타겟 세그먼트: {inp['targetSegment']}\n\n"
+                    f"## {rag_context}\n\n"
+                    f"## 평가 기준\n{EVALUATION_CRITERIA}\n\n"
+                    f"## 응답 형식\n"
+                    f"아래 JSON 스키마로만 응답하세요 (다른 텍스트 없이).\n"
+                    f"marketScore는 1~10 정수로 산출하세요.\n"
+                    f"{schema_example}"
+                ),
+            },
+        ],
+    )
 
-    text = next(b.text for b in final_message.content if b.type == "text")
+    text = response.choices[0].message.content or ""
     start, end = text.find('{'), text.rfind('}') + 1
 
     if start == -1 or end == 0:
         output = MarketEvalOutput(
             startupId=inp["startupId"],
-            tam="미공개",
-            targetSegment=inp["targetSegment"],
-            cagr="미공개",
             marketScore=0,
             scoringReason="파싱 실패",
+            sources=[],
         )
     else:
         try:
             parsed = json.loads(text[start:end])
-            output = MarketEvalOutput(**parsed)
-        except (json.JSONDecodeError, TypeError):
+            output = MarketEvalOutput(
+                startupId=parsed["startupId"],
+                marketScore=parsed["marketScore"],
+                scoringReason=parsed["scoringReason"],
+                sources=parsed.get("sources", []),
+            )
+        except (json.JSONDecodeError, TypeError, KeyError):
             output = MarketEvalOutput(
                 startupId=inp["startupId"],
-                tam="미공개",
-                targetSegment=inp["targetSegment"],
-                cagr="미공개",
                 marketScore=0,
                 scoringReason="파싱 실패",
+                sources=[],
             )
 
     state["output"] = output

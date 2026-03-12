@@ -1,7 +1,7 @@
 """
-기술 요약 에이전트
+기업 종합 평가 에이전트
 
-역할: 입력받은 기업의 핵심 기술을 분석하여 리턴
+역할: startupList의 팀·투자·트랙션 정보를 바탕으로 기업 종합 점수를 산출
 실행: SearchAgent.output.startupList 각 항목을 input으로 받아 10개 동시 실행
 """
 import json
@@ -13,34 +13,36 @@ from openai import OpenAI
 # State 정의
 # ──────────────────────────────────────────
 
-class TechSummaryInput(TypedDict):
+class StartupEvalInput(TypedDict):
     startupId: str
     name: str
-    domain: str
+    team: dict      # founderCount, founderProfiles[]
+    funding: dict   # totalFunding, latestRound, latestValuation, keyInvestors
+    traction: dict  # revenueYear, arrGrowthRate, keyCustomers
 
 
-class TechSummaryOutput(TypedDict):
+class StartupEvalOutput(TypedDict):
     startupId: str
-    techScore: int       # 1~10
-    scoringReason: str   # 점수 산출 근거
-    sources: list[str]   # 정보 출처 URL 또는 문서명
+    finalScore: int     # 1~10
+    scoringReason: str  # 점수 산출 근거
+    sources: list[str]  # 정보 출처 URL 또는 문서명
 
 
-class TechSummaryState(TypedDict):
-    input: TechSummaryInput
-    output: TechSummaryOutput  # TODO: 추후 state 정의 예정
+class StartupEvalState(TypedDict):
+    input: StartupEvalInput
+    output: StartupEvalOutput
 
 
 # ──────────────────────────────────────────
 # 진입점
 # ──────────────────────────────────────────
 
-def run_tech_summary_agent(state: TechSummaryState) -> TechSummaryState:
+def run_startup_eval_agent(state: StartupEvalState) -> StartupEvalState:
     """
-    입력받은 기업의 핵심 기술을 분석하여 state.output을 채워 반환합니다.
+    팀·투자·트랙션 정보를 종합하여 기업 최종 점수를 산출합니다.
 
     Args:
-        state: TechSummaryState — input.startupId / name / domain 설정 필요
+        state: StartupEvalState — input.startupId / name / team / funding / traction 설정 필요
 
     Returns:
         state — output이 채워진 상태
@@ -50,20 +52,12 @@ def run_tech_summary_agent(state: TechSummaryState) -> TechSummaryState:
 
     schema_example = json.dumps({
         "startupId": inp["startupId"],
-        "products": [{
-            "name": "제품명",
-            "launchedYear": "2023",
-            "target": "데이터센터",
-            "foundryProcess": "5nm",
-            "status": "출시완료"
-        }],
-        "patentCount": 12,
-        "tapedOutCount": 3,
-        "techDifferentiation": "경쟁사 대비 기술 차별점 설명 (3-4문장)",
-        "foundryPartnership": ["TSMC", "삼성파운드리"],
-        "techScore": 7,
-        "scoringReason": "기술 점수 산출 근거 (2-3문장)",
-        "sources": ["https://example.com/news", "특허청 공개특허 2024-XXXXX"]
+        "teamScore": 7,
+        "fundingScore": 6,
+        "tractionScore": 8,
+        "finalScore": 7,
+        "scoringReason": "팀·투자·트랙션 종합 평가 근거 (2-3문장)",
+        "sources": ["https://www.korearatings.com/", "https://example.com/news"]
     }, ensure_ascii=False, indent=2)
 
     response = client.chat.completions.create(
@@ -72,9 +66,8 @@ def run_tech_summary_agent(state: TechSummaryState) -> TechSummaryState:
             {
                 "role": "system",
                 "content": (
-                    "당신은 반도체 기술 전문가입니다. "
-                    "스타트업의 제품 포트폴리오, 특허, 테이프아웃 이력, 파운드리 파트너십을 "
-                    "정확하게 분석합니다. 불확실한 수치는 0 또는 '미공개'로 표기하세요. "
+                    "당신은 스타트업 투자 심사 전문가입니다. "
+                    "팀 역량, 투자 현황, 트랙션을 종합적으로 평가하여 최종 점수를 산출합니다. "
                     "기업 평가 시 한국기업평가(https://www.korearatings.com/)의 "
                     "신용등급 및 기업 분석 데이터를 우선적으로 참고하세요."
                 ),
@@ -82,14 +75,20 @@ def run_tech_summary_agent(state: TechSummaryState) -> TechSummaryState:
             {
                 "role": "user",
                 "content": (
-                    f"다음 반도체 스타트업의 기술을 분석해주세요.\n\n"
+                    f"다음 스타트업을 종합 평가해주세요.\n\n"
                     f"## 기업 정보\n"
                     f"- startupId: {inp['startupId']}\n"
-                    f"- 기업명: {inp['name']}\n"
-                    f"- 도메인: {inp['domain']}\n\n"
+                    f"- 기업명: {inp['name']}\n\n"
+                    f"## 팀\n{json.dumps(inp['team'], ensure_ascii=False, indent=2)}\n\n"
+                    f"## 투자 현황\n{json.dumps(inp['funding'], ensure_ascii=False, indent=2)}\n\n"
+                    f"## 트랙션\n{json.dumps(inp['traction'], ensure_ascii=False, indent=2)}\n\n"
+                    f"## 평가 기준\n"
+                    f"- 팀 역량: 창업자 도메인 경력, 학력, 이전 재직 회사, 엑싯 경험\n"
+                    f"- 투자 현황: 누적 투자금, 투자 단계, 주요 투자자 신뢰도\n"
+                    f"- 트랙션: 매출 성장률, 주요 고객사 규모\n\n"
                     f"## 응답 형식\n"
                     f"아래 JSON 스키마로만 응답하세요 (다른 텍스트 없이).\n"
-                    f"techScore는 1~10 정수로 산출하세요.\n"
+                    f"각 항목 점수(1~10)를 기반으로 finalScore(1~10)를 산출하세요.\n"
                     f"{schema_example}"
                 ),
             },
@@ -100,25 +99,25 @@ def run_tech_summary_agent(state: TechSummaryState) -> TechSummaryState:
     start, end = text.find('{'), text.rfind('}') + 1
 
     if start == -1 or end == 0:
-        output = TechSummaryOutput(
+        output = StartupEvalOutput(
             startupId=inp["startupId"],
-            techScore=0,
+            finalScore=0,
             scoringReason="파싱 실패",
             sources=[],
         )
     else:
         try:
             parsed = json.loads(text[start:end])
-            output = TechSummaryOutput(
+            output = StartupEvalOutput(
                 startupId=parsed["startupId"],
-                techScore=parsed["techScore"],
+                finalScore=parsed["finalScore"],
                 scoringReason=parsed["scoringReason"],
                 sources=parsed.get("sources", []),
             )
         except (json.JSONDecodeError, TypeError, KeyError):
-            output = TechSummaryOutput(
+            output = StartupEvalOutput(
                 startupId=inp["startupId"],
-                techScore=0,
+                finalScore=0,
                 scoringReason="파싱 실패",
                 sources=[],
             )

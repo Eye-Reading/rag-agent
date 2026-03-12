@@ -11,10 +11,11 @@ import json
 from datetime import datetime, timezone
 from typing import TypedDict
 
-import anthropic
+from openai import OpenAI
 
 from .market_eval_agent import run_market_eval_agent, MarketEvalState
 from .tech_summary_agent import run_tech_summary_agent, TechSummaryState
+from .startup_eval_agent import run_startup_eval_agent, StartupEvalState
 
 
 # ──────────────────────────────────────────
@@ -76,6 +77,7 @@ class SearchOutput(TypedDict):
     startupList: list[StartupInfo]
     fetchedAt: str      # ISO 8601, 재탐색 시 이전 결과와 비교용
     totalFetched: int   # 실제로 LLM이 가져온 기업 수
+    analyses: dict      # 기업명 → {market_eval: MarketEvalOutput, tech_summary: TechSummaryOutput}
 
 
 class SearchAgentState(TypedDict):
@@ -89,55 +91,88 @@ class SearchAgentState(TypedDict):
 
 _TOOLS = [
     {
-        "name": "evaluate_market",
-        "description": (
-            "market_eval_agent를 호출하여 특정 반도체 스타트업의 시장성을 평가합니다. "
-            "TAM, CAGR, targetSegment, marketScore(1~5), scoringReason을 반환합니다."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "startup": {
-                    "type": "object",
-                    "description": "평가할 스타트업 정보",
-                    "properties": {
-                        "startupId":     {"type": "string"},
-                        "name":          {"type": "string"},
-                        "domain":        {"type": "string"},
-                        "targetSegment": {"type": "string"},  # 기업이 공략하는 세부 시장
-                        "location":      {"type": "string"},
-                        "stage":         {"type": "string"},
-                        "funding":       {"type": "object"},
-                        "traction":      {"type": "object"},
-                    },
-                    "required": ["startupId", "name", "domain"],
-                }
+        "type": "function",
+        "function": {
+            "name": "evaluate_market",
+            "description": (
+                "market_eval_agent를 호출하여 특정 반도체 스타트업의 시장성을 평가합니다. "
+                "marketScore(1~10), scoringReason, sources를 반환합니다."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "startup": {
+                        "type": "object",
+                        "description": "평가할 스타트업 정보",
+                        "properties": {
+                            "startupId":     {"type": "string"},
+                            "name":          {"type": "string"},
+                            "domain":        {"type": "string"},
+                            "targetSegment": {"type": "string"},
+                            "location":      {"type": "string"},
+                            "stage":         {"type": "string"},
+                            "funding":       {"type": "object"},
+                            "traction":      {"type": "object"},
+                        },
+                        "required": ["startupId", "name", "domain"],
+                    }
+                },
+                "required": ["startup"],
             },
-            "required": ["startup"],
         },
     },
     {
-        "name": "summarize_technology",
-        "description": (
-            "tech_summary_agent를 호출하여 특정 반도체 스타트업의 기술을 분석합니다. "
-            "products, patentCount, tapedOutCount, techDifferentiation, "
-            "foundryPartnership, techScore(1~5), scoringReason을 반환합니다."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "startup": {
-                    "type": "object",
-                    "description": "기술 분석할 스타트업 정보",
-                    "properties": {
-                        "startupId": {"type": "string"},
-                        "name":      {"type": "string"},
-                        "domain":    {"type": "string"},
-                    },
-                    "required": ["startupId", "name", "domain"],
-                }
+        "type": "function",
+        "function": {
+            "name": "summarize_technology",
+            "description": (
+                "tech_summary_agent를 호출하여 특정 반도체 스타트업의 기술을 분석합니다. "
+                "techScore(1~10), scoringReason, sources를 반환합니다."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "startup": {
+                        "type": "object",
+                        "description": "기술 분석할 스타트업 정보",
+                        "properties": {
+                            "startupId": {"type": "string"},
+                            "name":      {"type": "string"},
+                            "domain":    {"type": "string"},
+                        },
+                        "required": ["startupId", "name", "domain"],
+                    }
+                },
+                "required": ["startup"],
             },
-            "required": ["startup"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "evaluate_startup",
+            "description": (
+                "startup_eval_agent를 호출하여 팀·투자·트랙션을 종합 평가합니다. "
+                "finalScore(1~10), scoringReason, sources를 반환합니다."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "startup": {
+                        "type": "object",
+                        "description": "종합 평가할 스타트업 정보",
+                        "properties": {
+                            "startupId": {"type": "string"},
+                            "name":      {"type": "string"},
+                            "team":      {"type": "object"},
+                            "funding":   {"type": "object"},
+                            "traction":  {"type": "object"},
+                        },
+                        "required": ["startupId", "name", "team", "funding", "traction"],
+                    }
+                },
+                "required": ["startup"],
+            },
         },
     },
 ]
@@ -149,7 +184,7 @@ _TOOLS = [
 
 def _get_startup_list(criteria: SearchCriteria) -> list[StartupInfo]:
     """searchCriteria 기반으로 국내 반도체 스타트업 목록을 수집합니다."""
-    client = anthropic.Anthropic()
+    client = OpenAI()
 
     domain_filter  = criteria.get("targetDomain", "반도체")
     stage_filter   = criteria.get("targetStage", "")
@@ -196,30 +231,32 @@ def _get_startup_list(criteria: SearchCriteria) -> list[StartupInfo]:
         }
     }, ensure_ascii=False, indent=2)
 
-    with client.messages.stream(
-        model="claude-opus-4-6",
-        max_tokens=8192,
-        thinking={"type": "adaptive"},
-        system=(
-            "당신은 국내 반도체 스타트업 생태계 전문가입니다. "
-            "스타트업의 팀 구성, 투자 현황, 트랙션 정보를 정확히 파악하고 있습니다. "
-            "정보가 불확실한 경우 '미공개' 또는 빈 리스트로 표기하세요."
-        ),
-        messages=[{
-            "role": "user",
-            "content": (
-                f"다음 조건에 맞는 국내 반도체 스타트업 {fetch_count}개를 탐색해주세요.\n\n"
-                f"## 탐색 조건\n{filter_desc}\n"
-                f"## 응답 형식\n"
-                f"아래 JSON 스키마를 가진 배열로만 응답하세요 (다른 텍스트 없이):\n"
-                f"{schema_example}\n\n"
-                f"위 스키마를 가진 JSON 배열로 {fetch_count}개 기업을 응답하세요."
-            )
-        }]
-    ) as stream:
-        final_message = stream.get_final_message()
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "당신은 국내 반도체 스타트업 생태계 전문가입니다. "
+                    "스타트업의 팀 구성, 투자 현황, 트랙션 정보를 정확히 파악하고 있습니다. "
+                    "정보가 불확실한 경우 '미공개' 또는 빈 리스트로 표기하세요."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"다음 조건에 맞는 국내 반도체 스타트업 {fetch_count}개를 탐색해주세요.\n\n"
+                    f"## 탐색 조건\n{filter_desc}\n"
+                    f"## 응답 형식\n"
+                    f"아래 JSON 스키마를 가진 배열로만 응답하세요 (다른 텍스트 없이):\n"
+                    f"{schema_example}\n\n"
+                    f"위 스키마를 가진 JSON 배열로 {fetch_count}개 기업을 응답하세요."
+                ),
+            },
+        ],
+    )
 
-    text = next(b.text for b in final_message.content if b.type == "text")
+    text = response.choices[0].message.content or ""
     start, end = text.find('['), text.rfind(']') + 1
     if start == -1 or end == 0:
         raise ValueError(f"스타트업 목록 JSON 파싱 실패. 응답: {text[:300]}")
@@ -252,6 +289,19 @@ def _route_tool(tool_name: str, tool_input: dict) -> str:
             output={},  # type: ignore[typeddict-item]
         )
         result = run_tech_summary_agent(tech_state)["output"]
+
+    elif tool_name == "evaluate_startup":
+        eval_state = StartupEvalState(
+            input={
+                "startupId": startup["startupId"],
+                "name":      startup["name"],
+                "team":      startup["team"],
+                "funding":   startup["funding"],
+                "traction":  startup["traction"],
+            },
+            output={},  # type: ignore[typeddict-item]
+        )
+        result = run_startup_eval_agent(eval_state)["output"]
 
     else:
         result = {"error": f"알 수 없는 툴: {tool_name}"}
@@ -286,7 +336,7 @@ def run_search_agent(state: SearchAgentState) -> SearchAgentState:
         state — output.startupList / fetchedAt / totalFetched 가 채워진 상태
         ※ 분석 결과(market_eval, tech_summary)는 _send_to_next_stage()로 전달됩니다.
     """
-    client = anthropic.Anthropic()
+    client = OpenAI()
     criteria = state["input"]["searchCriteria"]
 
     # Step 1: 스타트업 목록 수집
@@ -297,73 +347,72 @@ def run_search_agent(state: SearchAgentState) -> SearchAgentState:
     # Step 2: Supervisor loop — 시장성 평가 + 기술 요약
     print("🤖 시장성 평가 및 기술 요약 시작...\n")
 
-    system_prompt = (
-        "당신은 반도체 스타트업 분석을 총괄하는 에이전트입니다.\n\n"
-        "주어진 스타트업 목록 전체에 대해 다음 작업을 수행하세요:\n"
-        "1. 각 스타트업마다 evaluate_market 툴로 시장성 평가\n"
-        "2. 각 스타트업마다 summarize_technology 툴로 기술 요약\n"
-        "3. 모든 기업의 두 툴 호출이 완료되면 작업 종료\n\n"
-        f"총 {len(startup_list)}개 기업 모두에 대해 두 툴을 빠짐없이 호출해야 합니다."
-    )
-
-    messages = [{
-        "role": "user",
-        "content": (
-            f"다음 반도체 스타트업 {len(startup_list)}개를 분석해주세요:\n\n"
-            f"{json.dumps(startup_list, ensure_ascii=False, indent=2)}\n\n"
-            "각 스타트업에 대해 evaluate_market과 summarize_technology를 모두 호출하세요."
-        )
-    }]
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "당신은 반도체 스타트업 분석을 총괄하는 에이전트입니다.\n\n"
+                "주어진 스타트업 목록 전체에 대해 다음 작업을 수행하세요:\n"
+                "1. 각 스타트업마다 evaluate_market 툴로 시장성 평가\n"
+                "2. 각 스타트업마다 summarize_technology 툴로 기술 요약\n"
+                "3. 각 스타트업마다 evaluate_startup 툴로 종합 평가\n"
+                "4. 모든 기업의 세 툴 호출이 완료되면 작업 종료\n\n"
+                f"총 {len(startup_list)}개 기업 모두에 대해 세 툴을 빠짐없이 호출해야 합니다."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"다음 반도체 스타트업 {len(startup_list)}개를 분석해주세요:\n\n"
+                f"{json.dumps(startup_list, ensure_ascii=False, indent=2)}\n\n"
+                "각 스타트업에 대해 evaluate_market, summarize_technology, evaluate_startup을 모두 호출하세요."
+            ),
+        },
+    ]
 
     analyses: dict[str, dict] = {}
-    iteration = 0
 
     while True:
-        iteration += 1
-
-        with client.messages.stream(
-            model="claude-opus-4-6",
-            max_tokens=8192,
-            thinking={"type": "adaptive"},
-            system=system_prompt,
-            tools=_TOOLS,
+        response = client.chat.completions.create(
+            model="gpt-4o",
             messages=messages,
-        ) as stream:
-            response = stream.get_final_message()
+            tools=_TOOLS,
+        )
 
-        if response.stop_reason == "tool_use":
-            tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
-            messages.append({"role": "assistant", "content": response.content})
+        choice = response.choices[0]
 
-            tool_results = []
-            for tool_use in tool_use_blocks:
-                startup_name = tool_use.input.get("startup", {}).get("name", "unknown")
-                print(f"  [{tool_use.name}] {startup_name}")
+        if choice.finish_reason == "tool_calls":
+            messages.append(choice.message)
 
-                result_str = _route_tool(tool_use.name, tool_use.input)
+            for tool_call in choice.message.tool_calls:
+                tool_input = json.loads(tool_call.function.arguments)
+                startup_name = tool_input.get("startup", {}).get("name", "unknown")
+                print(f"  [{tool_call.function.name}] {startup_name}")
+
+                result_str = _route_tool(tool_call.function.name, tool_input)
                 result = json.loads(result_str)
 
                 if startup_name not in analyses:
                     analyses[startup_name] = {}
-                if tool_use.name == "evaluate_market":
+                if tool_call.function.name == "evaluate_market":
                     analyses[startup_name]["market_eval"] = result
-                elif tool_use.name == "summarize_technology":
+                elif tool_call.function.name == "summarize_technology":
                     analyses[startup_name]["tech_summary"] = result
+                elif tool_call.function.name == "evaluate_startup":
+                    analyses[startup_name]["startup_eval"] = result
 
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tool_use.id,
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
                     "content": result_str,
                 })
 
-            messages.append({"role": "user", "content": tool_results})
-
-        elif response.stop_reason == "end_turn":
+        elif choice.finish_reason == "stop":
             print(f"\n✅ 분석 완료 — {len(analyses)}개 기업")
             break
 
         else:
-            print(f"⚠️  예상치 못한 stop_reason: {response.stop_reason}")
+            print(f"⚠️  예상치 못한 finish_reason: {choice.finish_reason}")
             break
 
     # Step 3: state output 채우기
@@ -371,6 +420,7 @@ def run_search_agent(state: SearchAgentState) -> SearchAgentState:
         startupList=startup_list,
         fetchedAt=datetime.now(timezone.utc).isoformat(),
         totalFetched=len(startup_list),
+        analyses=analyses,
     )
 
     # Step 4: 다음 단계 에이전트에 전달
