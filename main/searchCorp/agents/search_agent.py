@@ -8,6 +8,8 @@ Search 에이전트 (Supervisor)
   4. 다음 단계 에이전트에 전달 (미구현)
 """
 import json
+import os
+import sys
 from datetime import datetime, timezone
 from typing import TypedDict
 
@@ -86,6 +88,7 @@ class RejectionRecord(TypedDict):
     startupScore: int
     startupScoringReason: str
     startupInfo: StartupInfo  # 원본 기업 데이터
+    references: list[str]     # market_eval · tech_summary · startup_eval 출처 통합
 
 
 class SearchOutput(TypedDict):
@@ -351,14 +354,43 @@ def _route_tool(tool_name: str, tool_input: dict) -> str:
 
 def _send_to_next_stage(state: SearchAgentState, analyses: dict) -> None:
     """
-    다음 단계 에이전트에 state와 분석 결과를 전달합니다.
+    투자 판단 에이전트에 state를 전달합니다.
 
-    TODO: 다음 단계 에이전트 구현 예정
     Args:
         state:    SearchAgentState (output.startupList 포함)
-        analyses: 기업명 → {market_eval, tech_summary}
+        analyses: 기업명 → {market_eval, tech_summary, startup_eval}
     """
-    _ = state, analyses  # TODO: 다음 단계 에이전트 연결 시 제거
+    _ = analyses
+
+    # main/searchCorp 실행 기준 sys.path에는 searchCorp 디렉토리만 포함되므로,
+    # 형제 디렉토리인 main/investDecision 패키지 임포트를 위해 main 경로를 추가합니다.
+    main_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if main_dir not in sys.path:
+        sys.path.insert(0, main_dir)
+
+    from investDecision.agents.investment_decision_agent import (  # pylint: disable=import-outside-toplevel
+        InvestmentDecisionState,
+        run_investment_decision_agent,
+    )
+
+    output = state["output"]
+    investment_state: InvestmentDecisionState = {
+        "input": {
+            "allRejected": output.get("allRejected", False),
+            "passReport": output.get("passReport", []),
+            "rejectionReport": output.get("rejectionReport", []),
+        },
+        "output": {
+            "allRejected": False,
+            "rankings": [],
+            "rejectionReport": [],
+        },
+    }
+
+    run_investment_decision_agent(investment_state)
+
+    # 다음 노드 개발자가 참조할 수 있도록 search state에 부착합니다.
+    output["investmentDecision"] = investment_state["output"]  # type: ignore[index]
 
 
 # ──────────────────────────────────────────
@@ -480,6 +512,11 @@ def run_search_agent(state: SearchAgentState) -> SearchAgentState:
         market  = a.get("market_eval",  {})
         tech    = a.get("tech_summary", {})
         startup = a.get("startup_eval", {})
+        references = list(dict.fromkeys(
+            market.get("sources", [])
+            + tech.get("sources", [])
+            + startup.get("sources", [])
+        ))
         return RejectionRecord(
             companyName=name,
             totalScore=(
@@ -494,6 +531,7 @@ def run_search_agent(state: SearchAgentState) -> SearchAgentState:
             startupScore=startup.get("finalScore", 0),
             startupScoringReason=startup.get("scoringReason", ""),
             startupInfo=startup_map.get(name, {}),  # type: ignore[arg-type]
+            references=references,
         )
 
     evaluations: list[RejectionRecord] = [_build_record(name) for name in analyses]

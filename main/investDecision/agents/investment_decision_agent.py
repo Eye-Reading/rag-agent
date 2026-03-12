@@ -295,6 +295,17 @@ def _build_investment_ranking(company: PassedCompany) -> InvestmentRanking:
     )
 
 
+def _send_to_next_stage(state: InvestmentDecisionState) -> None:
+    """
+    다음 단계(보고서 생성 에이전트)로 state를 전달합니다.
+
+    TODO: 보고서 생성 에이전트 구현 시 실제 노드 호출로 교체
+    Args:
+        state: InvestmentDecisionState
+    """
+    _ = state
+
+
 # ──────────────────────────────────────────
 # 진입점 (구현은 Step 4에서 완성)
 # ──────────────────────────────────────────
@@ -324,6 +335,7 @@ def run_investment_decision_agent(state: InvestmentDecisionState) -> InvestmentD
             rankings=[],
             rejectionReport=inp.get("rejectionReport", []),
         )
+        _send_to_next_stage(state)
         return state
 
     pass_report = inp.get("passReport", [])
@@ -339,4 +351,5 @@ def run_investment_decision_agent(state: InvestmentDecisionState) -> InvestmentD
         rankings=rankings,
         rejectionReport=[],
     )
+    _send_to_next_stage(state)
     return state
