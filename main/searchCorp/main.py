@@ -109,17 +109,7 @@ def main():
 
     print(f"\n결과 저장: {output_path}")
     print(f"투자판단 저장: {investment_output_path}")
-
-    # 마크다운 보고서 저장
-    report: str = investment_decision.get("report", "")
-    if report:
-        report_filename = f"report_{date.today().isoformat()}.md"
-        report_path = os.path.join(_BASE_DIR, report_filename)
-        with open(report_path, "w", encoding="utf-8") as f:
-            f.write(report)
-        print(f"보고서 저장: {report_path}")
-    else:
-        print("보고서 생성 결과가 없습니다. 파이프라인 로그를 확인하세요.")
+    # PDF 보고서는 보고서 생성 에이전트 내부에서 main/searchCorp/ 에 저장됩니다.
 
 
 if __name__ == "__main__":

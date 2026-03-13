@@ -5,15 +5,17 @@
   1. 투자 판단 에이전트에서 전달받은 State(allRejected, rankings, rejectionReport)를 수신
   2. allRejected 플래그에 따라 Case A(투자 추천 순위) 또는 Case B(전원 보류) 분기
   3. 분기에 맞는 System Prompt와 데이터를 매핑하여 LLM 호출 준비
-  4. LLM이 생성한 최종 마크다운 보고서를 State에 저장
+  4. LLM이 생성한 마크다운을 전문 보고서 스타일 PDF로 변환하여 저장
 """
 import json
+import os
 from datetime import date
-from typing import Optional, TypedDict
+from typing import NotRequired, Optional, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
+from .pdf_renderer import render_pdf
 from .prompts.case_a import CASE_A_SYSTEM_PROMPT
 from .prompts.case_b import CASE_B_SYSTEM_PROMPT
 
@@ -44,7 +46,8 @@ class ReportWriterInput(TypedDict):
 
 
 class ReportWriterOutput(TypedDict):
-    report: str  # LLM이 생성한 최종 마크다운 보고서
+    report: str                  # LLM이 생성한 마크다운 보고서 (원문)
+    pdf_path: NotRequired[str]   # 변환된 PDF 파일 경로
 
 
 class ReportWriterState(TypedDict):
@@ -92,7 +95,7 @@ def _generate_report(prompt_ctx: _PromptContext) -> str:
     response = llm.invoke(messages)
     report: str = str(response.content)
 
-    print(f"[ReportWriter] 보고서 생성 완료 — {len(report)}자")
+    print(f"[ReportWriter] 마크다운 생성 완료 — {len(report)}자")
     return report
 
 
@@ -154,5 +157,21 @@ def run_report_writer_agent(state: ReportWriterState) -> ReportWriterState:
     """
     prompt_ctx = prepare_prompt_context(state)
     report = _generate_report(prompt_ctx)
-    state["output"] = ReportWriterOutput(report=report)
+
+    # 마크다운 → PDF 변환
+    report_type = "투자 추천 순위 보고서" if prompt_ctx["case"] == "A" else "전원 보류 보고서"
+    today = date.today().isoformat()
+    case_label = f"case_{'a' if prompt_ctx['case'] == 'A' else 'b'}"
+
+    # 파이프라인 출력물은 항상 main/searchCorp/ 에 저장합니다.
+    # report_writer_agent.py 위치: main/reportWriter/agents/
+    # main/searchCorp/ 는 두 단계 위(main/)의 searchCorp 형제 디렉토리입니다.
+    _agents_dir = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(os.path.dirname(os.path.dirname(_agents_dir)), "searchCorp")
+    pdf_filename = f"report_{case_label}_{today}.pdf"
+    pdf_path = os.path.join(output_dir, pdf_filename)
+
+    render_pdf(report, pdf_path, report_type)
+
+    state["output"] = ReportWriterOutput(report=report, pdf_path=pdf_path)
     return state
