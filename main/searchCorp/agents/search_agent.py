@@ -12,7 +12,9 @@ import os
 import sys
 from datetime import datetime, timezone
 from typing import NotRequired, TypedDict
+from urllib.parse import urlparse
 
+import requests
 from openai import OpenAI
 
 from .market_eval_agent import run_market_eval_agent, MarketEvalState
@@ -207,6 +209,36 @@ _TOOLS = [
 # ──────────────────────────────────────────
 # 내부 헬퍼
 # ──────────────────────────────────────────
+
+def _is_accessible_url(url: str, timeout: int = 5) -> bool:
+    """URL이 실제로 열람 가능한지 HTTP 요청으로 확인합니다."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return False
+        resp = requests.head(url, timeout=timeout, allow_redirects=True,
+                             headers={"User-Agent": "Mozilla/5.0"})
+        if resp.status_code == 405:  # HEAD 미지원 시 GET으로 재시도
+            resp = requests.get(url, timeout=timeout, allow_redirects=True,
+                                headers={"User-Agent": "Mozilla/5.0"}, stream=True)
+        return resp.status_code < 400
+    except Exception:
+        return False
+
+
+def _filter_accessible_sources(sources: list[str]) -> list[str]:
+    """URL 형식인 항목만 접근성 검증 후 반환, 비-URL 텍스트는 그대로 유지합니다."""
+    result = []
+    for src in sources:
+        parsed = urlparse(src)
+        if parsed.scheme in ("http", "https") and parsed.netloc:
+            if _is_accessible_url(src):
+                result.append(src)
+            else:
+                print(f"  ⚠️  접근 불가 링크 제외: {src}")
+        else:
+            result.append(src)  # 문서명 등 비-URL 참고자료는 유지
+    return result
 
 def _get_startup_list(criteria: SearchCriteria) -> list[StartupInfo]:
     """searchCriteria 기반으로 국내 반도체 스타트업 목록을 수집합니다."""
@@ -544,11 +576,12 @@ def run_search_agent(state: SearchAgentState) -> SearchAgentState:
         market  = a.get("market_eval",  {})
         tech    = a.get("tech_summary", {})
         startup = a.get("startup_eval", {})
-        references = list(dict.fromkeys(
+        raw_references = list(dict.fromkeys(
             market.get("sources", [])
             + tech.get("sources", [])
             + startup.get("sources", [])
         ))
+        references = _filter_accessible_sources(raw_references)
         return RejectionRecord(
             companyName=name,
             totalScore=(
