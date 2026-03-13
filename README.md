@@ -42,7 +42,7 @@
 [Architecture Diagram Image]
 ```
 
-![Architecture Diagram](docs/drawio.png)
+![Architecture Diagram](docs/draw.io.png)
 
 ### Supervisor 데이터 플로우 설계
 
