@@ -48,14 +48,21 @@ EVALUATION_CRITERIA = """
 - 기준 5:
 """
 
-_rag: Optional[MarketEvalRAG] = None
+_embed_model: str = "BAAI/bge-m3"
+_rag_cache: dict[str, MarketEvalRAG] = {}
+
+
+def set_embed_model(model_name: str) -> None:
+    """실행 전에 호출하여 임베딩 모델을 설정합니다."""
+    global _embed_model
+    _embed_model = model_name
 
 
 def get_rag() -> MarketEvalRAG:
-    global _rag
-    if _rag is None:
-        _rag = MarketEvalRAG()
-    return _rag
+    global _rag_cache, _embed_model
+    if _embed_model not in _rag_cache:
+        _rag_cache[_embed_model] = MarketEvalRAG(model_name=_embed_model)
+    return _rag_cache[_embed_model]
 
 
 # ──────────────────────────────────────────

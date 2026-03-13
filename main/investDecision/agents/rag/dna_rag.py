@@ -1,9 +1,9 @@
 """
 성공 롤모델 DNA RAG 파이프라인
 
-임베딩 모델 : BAAI/bge-m3
+임베딩 모델 : BAAI/bge-m3 (기본) 또는 nlpai-lab/KoE5
 벡터스토어  : Qdrant http://localhost:6333  (market_eval 과 동일 인스턴스, 별도 컬렉션)
-컬렉션      : dna_rolemodel
+컬렉션      : dna_rolemodel (bge-m3) / dna_rolemodel_koe5 (KoE5)
 
 적재 대상   : NVIDIA · Qualcomm · AMD
 중복 방지   : 기업명 기반 payload 필터로 이미 적재된 롤모델은 재적재하지 않음
@@ -41,22 +41,40 @@ from qdrant_client.models import (
 
 _ROLEMODEL_COMPANIES = ["NVIDIA", "Qualcomm", "AMD"]
 
+# 지원 임베딩 모델 → Qdrant 컬렉션명 매핑
+_MODEL_COLLECTION_MAP: dict[str, str] = {
+    "BAAI/bge-m3":    "dna_rolemodel",
+    "nlpai-lab/KoE5": "dna_rolemodel_koe5",
+}
+
+# 모델별 벡터 차원 (두 모델 모두 1024)
+_MODEL_VECTOR_SIZE: dict[str, int] = {
+    "BAAI/bge-m3":    1024,
+    "nlpai-lab/KoE5": 1024,
+}
+
 
 class DnaRoleModelRAG:
     """
-    BAAI/bge-m3 + Qdrant 기반 성공 롤모델 DNA 유사도 검색 파이프라인.
+    Qdrant 기반 성공 롤모델 DNA 유사도 검색 파이프라인.
 
+    model_name 으로 임베딩 모델을 선택합니다 (기본: BAAI/bge-m3).
+    모델이 다르면 별도 Qdrant 컬렉션을 사용하므로 실험 간 벡터가 섞이지 않습니다.
     - 기존 market_eval 컬렉션과 동일한 Qdrant 인스턴스를 공유하되
-      'dna_rolemodel' 컬렉션으로 데이터를 격리합니다.
+      컬렉션으로 데이터를 격리합니다.
     - 초기화 시 NVIDIA · Qualcomm · AMD 3사 데이터를
       자동으로 upsert합니다 (기업명 기반 중복 체크).
     """
 
-    MODEL_NAME      = "BAAI/bge-m3"
-    COLLECTION_NAME = "dna_rolemodel"
-    VECTOR_SIZE     = 1024  # BAAI/bge-m3 출력 차원
+    VECTOR_SIZE = 1024  # 지원 모델 공통 출력 차원
 
-    def __init__(self, qdrant_url: str = "http://localhost:6333"):
+    def __init__(self, model_name: str = "BAAI/bge-m3", qdrant_url: str = "http://localhost:6333"):
+        self.MODEL_NAME = model_name
+        self.COLLECTION_NAME = _MODEL_COLLECTION_MAP.get(
+            model_name,
+            "dna_rolemodel_" + model_name.split("/")[-1].lower().replace("-", "_"),
+        )
+        self.VECTOR_SIZE = _MODEL_VECTOR_SIZE.get(model_name, 1024)
         self._embedder: Optional[SentenceTransformer] = None
         self._qdrant = QdrantClient(url=qdrant_url)
         self._llm = OpenAI()

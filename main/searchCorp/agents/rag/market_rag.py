@@ -1,7 +1,7 @@
 """
 시장성 평가 RAG 파이프라인
 
-임베딩 모델: BAAI/bge-m3
+임베딩 모델: BAAI/bge-m3 (기본) 또는 nlpai-lab/KoE5
 벡터스토어:  Qdrant (http://localhost:6333)
 PDF 적재:    market_data/ 디렉토리의 PDF 자동 ingestion
 """
@@ -30,24 +30,43 @@ _MARKET_DATA_DIR = os.path.join(
 # PDF 페이지를 몇 페이지씩 묶어 하나의 청크로 만들지 설정
 _PAGES_PER_CHUNK = 2
 
+# 지원 임베딩 모델 → Qdrant 컬렉션명 매핑
+_MODEL_COLLECTION_MAP: dict[str, str] = {
+    "BAAI/bge-m3":      "market_eval",
+    "nlpai-lab/KoE5":   "market_eval_koe5",
+}
+
+# 모델별 벡터 차원 (두 모델 모두 1024)
+_MODEL_VECTOR_SIZE: dict[str, int] = {
+    "BAAI/bge-m3":    1024,
+    "nlpai-lab/KoE5": 1024,
+}
+
 
 class MarketEvalRAG:
     """
-    BAAI/bge-m3 + Qdrant 기반 시장성 평가 RAG 파이프라인.
+    Qdrant 기반 시장성 평가 RAG 파이프라인.
 
+    model_name 으로 임베딩 모델을 선택합니다 (기본: BAAI/bge-m3).
+    모델이 다르면 별도 Qdrant 컬렉션을 사용하므로 실험 간 벡터가 섞이지 않습니다.
     초기화 시 market_data/ 의 PDF를 자동으로 Qdrant에 적재합니다.
     이미 적재된 파일은 재적재하지 않습니다 (파일명 기반 중복 체크).
     """
 
-    MODEL_NAME      = "BAAI/bge-m3"
-    COLLECTION_NAME = "market_eval"
-    VECTOR_SIZE     = 1024  # BAAI/bge-m3 출력 차원
+    VECTOR_SIZE = 1024  # 지원 모델 공통 출력 차원
 
     def __init__(
         self,
+        model_name: str = "BAAI/bge-m3",
         data_dir: str = _MARKET_DATA_DIR,
         qdrant_url: str = "http://localhost:6333",
     ):
+        self.MODEL_NAME = model_name
+        self.COLLECTION_NAME = _MODEL_COLLECTION_MAP.get(
+            model_name,
+            "market_eval_" + model_name.split("/")[-1].lower().replace("-", "_"),
+        )
+        self.VECTOR_SIZE = _MODEL_VECTOR_SIZE.get(model_name, 1024)
         self._data_dir = data_dir
         self._embedder: Optional[SentenceTransformer] = None
 

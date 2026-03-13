@@ -144,15 +144,22 @@ MARKET_MAX_SCORE = 25.0
 TECH_MAX_SCORE = 25.0
 DNA_MAX_SCORE = 15.0
 
-_dna_rag: Optional[DnaRoleModelRAG] = None
+_dna_embed_model: str = "BAAI/bge-m3"
+_dna_rag_cache: dict[str, DnaRoleModelRAG] = {}
+
+
+def set_dna_embed_model(model_name: str) -> None:
+    """실행 전에 호출하여 DNA RAG 임베딩 모델을 설정합니다."""
+    global _dna_embed_model
+    _dna_embed_model = model_name
 
 
 def get_dna_rag() -> DnaRoleModelRAG:
-    """DNA 롤모델 RAG 싱글톤을 반환합니다."""
-    global _dna_rag
-    if _dna_rag is None:
-        _dna_rag = DnaRoleModelRAG()
-    return _dna_rag
+    """DNA 롤모델 RAG 인스턴스를 반환합니다 (모델별 캐시)."""
+    global _dna_rag_cache, _dna_embed_model
+    if _dna_embed_model not in _dna_rag_cache:
+        _dna_rag_cache[_dna_embed_model] = DnaRoleModelRAG(model_name=_dna_embed_model)
+    return _dna_rag_cache[_dna_embed_model]
 
 
 def _serialize_startup_info_for_dna(startup_info: StartupInfo) -> str:
