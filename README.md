@@ -42,7 +42,7 @@
 [Architecture Diagram Image]
 ```
 
-![Architecture Diagram](docs/draw.io.png)
+![Architecture Diagram](docs/drawio.png)
 
 ### Supervisor 데이터 플로우 설계
 
@@ -158,6 +158,8 @@ rag-agent/
 ```
 [Result Image]
 ```
+![Architecture Diagram](docs/result1.png)
+![Architecture Diagram](docs/result2.png)
 
 **실행 명령어**
 
@@ -183,6 +185,8 @@ python main/searchCorp/main.py
 ---
 
 ## 투자 보고서 핵심 인사이트
+
+> 실제 보고서 출력 결과: [투자 추천 순위 보고서 (2026-03-13)](docs/report.pdf)
 
 본 보고서는 반도체 도메인의 특수성을 반영한 **Agentic RAG 및 멀티 에이전트 파이프라인**을 통해 작성되었으며, 심사역(사용자)에게 다음과 같은 실질적 인사이트를 제공합니다.
 
