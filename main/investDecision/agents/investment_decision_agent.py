@@ -9,7 +9,7 @@
   5. 보고서 생성 에이전트로 State 전달
 """
 import json
-from typing import Optional, TypedDict
+from typing import NotRequired, Optional, TypedDict
 
 from .rag import DnaRoleModelRAG
 
@@ -127,6 +127,7 @@ class InvestmentDecisionOutput(TypedDict):
     allRejected: bool
     rankings: list[InvestmentRanking]       # 총점 내림차순 정렬 (allRejected=False)
     rejectionReport: list[PassedCompany]    # allRejected=True 일 때 다음 노드로 그대로 전달
+    report: NotRequired[str]                # 보고서 작성 에이전트가 채우는 최종 마크다운 보고서
 
 
 class InvestmentDecisionState(TypedDict):
@@ -297,13 +298,33 @@ def _build_investment_ranking(company: PassedCompany) -> InvestmentRanking:
 
 def _send_to_next_stage(state: InvestmentDecisionState) -> None:
     """
-    다음 단계(보고서 생성 에이전트)로 state를 전달합니다.
+    보고서 작성 LangGraph 워크플로우를 호출하고,
+    생성된 마크다운 보고서를 state["output"]["report"]에 저장합니다.
 
-    보고서 생성 에이전트가 준비되면 이 위치에서 실제 노드 호출을 연결합니다.
     Args:
-        state: InvestmentDecisionState
+        state: InvestmentDecisionState — output 이 채워진 상태
     """
-    _ = state
+    import os  # pylint: disable=import-outside-toplevel
+    import sys  # pylint: disable=import-outside-toplevel
+
+    # investDecision 패키지 기준으로 main 디렉토리를 sys.path에 추가합니다.
+    main_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if main_dir not in sys.path:
+        sys.path.insert(0, main_dir)
+
+    from reportWriter.graph import report_graph  # pylint: disable=import-outside-toplevel
+
+    output = state["output"]
+    pipeline_input = {
+        "allRejected": output.get("allRejected", False),
+        "rankings": output.get("rankings", []),
+        "rejectionReport": output.get("rejectionReport", []),
+        "report": "",
+    }
+
+    result = report_graph.invoke(pipeline_input)
+    output["report"] = result.get("report", "")  # type: ignore[typeddict-unknown-key]
+    print(f"\n[InvestmentDecision] 보고서 작성 완료 — {len(output['report'])}자")
 
 
 def _log_investment_output(output: InvestmentDecisionOutput) -> None:
